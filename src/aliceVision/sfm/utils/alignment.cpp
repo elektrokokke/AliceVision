@@ -56,6 +56,26 @@ std::ostream& operator<<(std::ostream& os, const MarkerWithCoord& marker)
     return os;
 }
 
+std::istream& operator>>(std::istream& in, MarkerDistance& markerDistance)
+{
+    std::string markerDistanceString;
+    in >> markerDistanceString;
+    std::vector<std::string> markerDistanceStringSplit;
+    boost::split(markerDistanceStringSplit, markerDistanceString, boost::algorithm::is_any_of(":"));
+    if(markerDistanceStringSplit.size() != 3)
+        throw std::invalid_argument("Failed to parse MarkerDistance from: " + markerDistanceString);
+    markerDistance.id1 = boost::lexical_cast<int>(markerDistanceStringSplit[0]);
+    markerDistance.id2 = boost::lexical_cast<int>(markerDistanceStringSplit[1]);
+    markerDistance.distance = boost::lexical_cast<double>(markerDistanceStringSplit[2]);
+    return in;
+}
+
+std::ostream& operator<<(std::ostream& os, const MarkerDistance& markerDistance)
+{
+    os << markerDistance.id1 << ":" << markerDistance.id2 << ":" << markerDistance.distance;
+    return os;
+}
+
 bool computeSimilarityFromCommonViews(const sfmData::SfMData& sfmDataA,
     const sfmData::SfMData& sfmDataB,
     const std::vector<std::pair<IndexT, IndexT>>& commonViewIds,
@@ -749,6 +769,133 @@ bool computeNewCoordinateSystemFromSpecificMarkers(const sfmData::SfMData& sfmDa
     const Mat4 RTS = Eigen::umeyama(ptsSrc, ptsDst, withScaling);
 
     return geometry::decomposeRTS(RTS, out_S, out_t, out_R);
+}
+
+bool computeScaleFromMarkerDistances(const sfmData::SfMData& sfmData,
+    const feature::EImageDescriberType& imageDescriberType,
+    const std::vector<MarkerDistance>& markerDistances,
+    double& out_S
+    )
+{
+    std::vector<std::pair<int,int>> landmarksIds(markerDistances.size(), std::make_pair(-1, -1));
+    int maxLandmarkIdx = 0;
+    for (const auto& landmarkIt : sfmData.getLandmarks())
+    {
+        if(landmarkIt.first > maxLandmarkIdx)
+            maxLandmarkIdx = landmarkIt.first;
+        if(landmarkIt.second.descType != imageDescriberType)
+            continue;
+        for (int i = 0; i < markerDistances.size(); ++i)
+        {
+            if (landmarkIt.second.rgb.r() == markerDistances[i].id1)
+            {
+                landmarksIds[i].first = landmarkIt.first;
+            }
+            if (landmarkIt.second.rgb.r() == markerDistances[i].id2)
+            {
+                landmarksIds[i].second = landmarkIt.first;
+            }
+        }
+    }
+    for (int i = 0; i < landmarksIds.size(); ++i)
+    {
+        if (landmarksIds[i].first == -1)
+        {
+            ALICEVISION_LOG_ERROR("Failed to find marker: " << int(markerDistances[i].id1));
+            ALICEVISION_THROW_ERROR("Failed to find marker: " << int(markerDistances[i].id1));
+        }
+        if (landmarksIds[i].second == -1)
+        {
+            ALICEVISION_LOG_ERROR("Failed to find marker: " << int(markerDistances[i].id2));
+            ALICEVISION_THROW_ERROR("Failed to find marker: " << int(markerDistances[i].id2));
+        }
+    }
+    std::vector<double> scaleFactors;
+    double scaleFactorSum = 0.0;
+    for (std::size_t i = 0; i < markerDistances.size(); ++i)
+    {
+        aliceVision::Vec3 p1 = sfmData.getLandmarks().at(landmarksIds[i].first).X;
+        aliceVision::Vec3 p2 = sfmData.getLandmarks().at(landmarksIds[i].second).X;
+        double distanceInModel = (p1-p2).norm();
+        double scaleFactor = markerDistances[i].distance / distanceInModel;
+        scaleFactors.push_back(scaleFactor);
+        scaleFactorSum += scaleFactor;
+        ALICEVISION_COUT("Given distance: " << markerDistances[i] << ", distance in model: " << distanceInModel << ", resulting scale factor: " << scaleFactor);
+    }
+    double scaleFactorMean = scaleFactorSum / (double)scaleFactors.size();
+    ALICEVISION_COUT("Mean of scale factors: " << scaleFactorMean);
+    double scaleFactorSqrDiffSum = 0.0;
+    double maxAbsDev = 0.0;
+    for (double s : scaleFactors)
+    {
+        double absDiff = std::abs(s - scaleFactorMean);
+        scaleFactorSqrDiffSum += absDiff * absDiff;
+        if (absDiff > maxAbsDev)
+        {
+            maxAbsDev = absDiff;
+        }
+    }
+    double scaleFactorStdDev = std::sqrt(scaleFactorSqrDiffSum / (double)scaleFactors.size());
+    ALICEVISION_COUT("Standard deviation: " << scaleFactorStdDev << " (" << scaleFactorStdDev * 100.0 / scaleFactorMean << "%)");
+    ALICEVISION_COUT("Maximum absolute deviation: " << maxAbsDev << " (" << maxAbsDev * 100.0 / scaleFactorMean << "%)");
+    std::nth_element(scaleFactors.begin(), scaleFactors.begin() + scaleFactors.size() / 2, scaleFactors.end());
+    double scaleFactorMedian = scaleFactors[scaleFactors.size() / 2];
+    ALICEVISION_COUT("Median of scale factors: " << scaleFactorMedian);
+    std::vector<double> scaleFactorAbsDiffs;
+    double maxAbsMedianDev = 0.0;
+    for (double s : scaleFactors)
+    {
+        double absDiff = std::abs(s - scaleFactorMedian);
+        scaleFactorAbsDiffs.push_back(absDiff);
+        if (absDiff > maxAbsMedianDev)
+        {
+            maxAbsMedianDev = absDiff;
+        }
+    }
+    std::nth_element(scaleFactorAbsDiffs.begin(), scaleFactorAbsDiffs.begin() + scaleFactorAbsDiffs.size() / 2, scaleFactorAbsDiffs.end());
+    double scaleFactorMedianAbsDev = scaleFactorAbsDiffs[scaleFactorAbsDiffs.size() / 2];
+    ALICEVISION_COUT("Median absolute deviation: " << scaleFactorMedianAbsDev << ", corresponding to a standard deviation of " << scaleFactorMedianAbsDev * 1.4826 << " (" << scaleFactorMedianAbsDev * 1.4826 * 100.0 / scaleFactorMedian << "%)");
+    ALICEVISION_COUT("Maximum absolute deviation: " << maxAbsMedianDev << " (" << maxAbsMedianDev * 100.0 / scaleFactorMedian << "%)");
+    out_S = scaleFactorMedian;
+    ALICEVISION_COUT("Set scale to " << scaleFactorMedian << " (median)");
+    return true;
+}
+
+sfmData::Landmarks filterMarkers(const sfmData::Landmarks &landmarks,
+    const feature::EImageDescriberType& imageDescriberType,
+    const std::vector<MarkerWithCoord>& markers)
+{
+    sfmData::Landmarks filteredLandmarks;
+    std::vector<int> landmarksIds(markers.size(), -1);
+    int maxLandmarkIdx = 0;
+    for (const auto& landmarkIt : landmarks)
+    {
+        if(landmarkIt.first > maxLandmarkIdx)
+            maxLandmarkIdx = landmarkIt.first;
+        if(landmarkIt.second.descType != imageDescriberType)
+            continue;
+        for (int i = 0; i < markers.size(); ++i)
+        {
+            if (landmarkIt.second.rgb.r() == markers[i].id)
+            {
+                landmarksIds[i] = landmarkIt.first;
+            }
+        }
+    }
+    for (int i = 0; i < landmarksIds.size(); ++i)
+    {
+        int landmarkId = landmarksIds[i];
+        if (landmarkId == -1)
+        {
+            ALICEVISION_LOG_ERROR("Failed to find marker: " << int(markers[i].id));
+            ALICEVISION_THROW_ERROR("Failed to find marker: " << int(markers[i].id));
+        }
+    }
+    for (std::size_t i = 0; i < markers.size(); ++i)
+    {
+        filteredLandmarks[landmarksIds[i]] = landmarks.at(landmarksIds[i]);
+    }
+    return filteredLandmarks;
 }
 
 } // namespace sfm

@@ -39,6 +39,8 @@ enum class EAlignmentMethod: unsigned char
   , AUTO_FROM_LANDMARKS
   , FROM_SINGLE_CAMERA
   , FROM_MARKERS
+  , FROM_MARKER_DISTANCES
+  , AUTO_FROM_MARKERS
 };
 
 /**
@@ -56,6 +58,8 @@ std::string EAlignmentMethod_enumToString(EAlignmentMethod alignmentMethod)
     case EAlignmentMethod::AUTO_FROM_LANDMARKS: return "auto_from_landmarks";
     case EAlignmentMethod::FROM_SINGLE_CAMERA:  return "from_single_camera";
     case EAlignmentMethod::FROM_MARKERS:        return "from_markers";
+    case EAlignmentMethod::FROM_MARKER_DISTANCES: return "from_marker_distances";
+    case EAlignmentMethod::AUTO_FROM_MARKERS:   return "auto_from_markers";
   }
   throw std::out_of_range("Invalid EAlignmentMethod enum");
 }
@@ -76,6 +80,8 @@ EAlignmentMethod EAlignmentMethod_stringToEnum(const std::string& alignmentMetho
   if(method == "auto_from_landmarks") return EAlignmentMethod::AUTO_FROM_LANDMARKS;
   if(method == "from_single_camera")  return EAlignmentMethod::FROM_SINGLE_CAMERA;
   if(method == "from_markers")        return EAlignmentMethod::FROM_MARKERS;
+  if(method == "from_marker_distances") return EAlignmentMethod::FROM_MARKER_DISTANCES;
+  if(method == "auto_from_markers")   return EAlignmentMethod::AUTO_FROM_MARKERS;
   throw std::out_of_range("Invalid SfM alignment method : " + alignmentMethod);
 }
 
@@ -190,6 +196,7 @@ int aliceVision_main(int argc, char **argv)
   bool applyRotation = true;
   bool applyTranslation = true;
   std::vector<sfm::MarkerWithCoord> markers;
+  std::vector<sfm::MarkerDistance> markerDistances;
   std::string outputViewsAndPosesFilepath;
 
   std::string manualTransform;
@@ -212,7 +219,9 @@ int aliceVision_main(int argc, char **argv)
         "\t- auto_from_cameras: Use cameras\n"
         "\t- auto_from_landmarks: Use landmarks\n"
         "\t- from_single_camera: Use camera specified by --tranformation\n"
-        "\t- from_markers: Use markers specified by --markers\n")
+        "\t- from_markers: Use markers specified by --markers\n"
+        "\t- from_marker_distances: Use distances between pairs of markers specified by --markerDistances\n"
+        "\t- auto_from_markers: Same as auto_from_landmarks, but with marker specified by --markers (ignoring the given positions)\n")
     ("transformation", po::value<std::string>(&transform)->default_value(transform),
       "required only for 'transformation' and 'single camera' methods:\n"
       "Transformation: Align [X,Y,Z] to +Y-axis, rotate around Y by R deg, scale by S; syntax: X,Y,Z;R;S\n"
@@ -234,6 +243,8 @@ int aliceVision_main(int argc, char **argv)
         "Apply translation transformation.")
     ("markers", po::value<std::vector<sfm::MarkerWithCoord>>(&markers)->multitoken(),
         "Markers ID and target coordinates 'ID:x,y,z'.")
+    ("markerDistances", po::value<std::vector<sfm::MarkerDistance>>(&markerDistances)->multitoken(),
+        "Pairs of marker IDs and the distances between them 'ID1:ID2:distance'.")
     ("outputViewsAndPoses", po::value<std::string>(&outputViewsAndPosesFilepath),
       "Path of the output SfMData file.")
     ;
@@ -277,6 +288,16 @@ int aliceVision_main(int argc, char **argv)
   system::Logger::get()->setLogLevel(verboseLevel);
 
   if (alignmentMethod == EAlignmentMethod::FROM_MARKERS && markers.empty())
+  {
+      ALICEVISION_LOG_ERROR("Missing --markers option");
+      return EXIT_FAILURE;
+  }
+  if (alignmentMethod == EAlignmentMethod::FROM_MARKER_DISTANCES && markerDistances.empty())
+  {
+      ALICEVISION_LOG_ERROR("Missing --markerDistances option");
+      return EXIT_FAILURE;
+  }
+  if (alignmentMethod == EAlignmentMethod::AUTO_FROM_MARKERS && markers.empty())
   {
       ALICEVISION_LOG_ERROR("Missing --markers option");
       return EXIT_FAILURE;
@@ -342,6 +363,8 @@ int aliceVision_main(int argc, char **argv)
     break;
 
     case EAlignmentMethod::FROM_MARKERS:
+    case EAlignmentMethod::FROM_MARKER_DISTANCES:
+    case EAlignmentMethod::AUTO_FROM_MARKERS:
     {
         std::vector<feature::EImageDescriberType> markersDescTypes = {
 #if ALICEVISION_IS_DEFINED(ALICEVISION_HAVE_CCTAG)
@@ -369,17 +392,28 @@ int aliceVision_main(int argc, char **argv)
             );
         if (vDescTypes.size() != 1)
         {
-            ALICEVISION_LOG_ERROR("Alignment from markers: Invalid number of image describer types: " << vDescTypes.size());
+            ALICEVISION_LOG_ERROR("Transform from markers/marker distances: Invalid number of image describer types: " << vDescTypes.size());
             for (auto d : vDescTypes)
             {
                 ALICEVISION_LOG_ERROR(" - " << feature::EImageDescriberType_enumToString(d));
             }
             return EXIT_FAILURE;
         }
-        const bool success = sfm::computeNewCoordinateSystemFromSpecificMarkers(sfmData, vDescTypes.front(), markers, applyScale, S, R, t);
+        bool success = false;
+        if (alignmentMethod == EAlignmentMethod::FROM_MARKERS)
+        {
+          success = sfm::computeNewCoordinateSystemFromSpecificMarkers(sfmData, vDescTypes.front(), markers, applyScale, S, R, t);
+        } else if (alignmentMethod == EAlignmentMethod::FROM_MARKER_DISTANCES) {
+          success = sfm::computeScaleFromMarkerDistances(sfmData, vDescTypes.front(), markerDistances, S);
+        } else if (alignmentMethod == EAlignmentMethod::AUTO_FROM_MARKERS) {
+          sfmData::SfMData filteredSfmData = sfmData;
+          filteredSfmData.structure = filterMarkers(sfmData.structure, vDescTypes.front(), markers);
+          sfm::computeNewCoordinateSystemFromLandmarks(filteredSfmData, feature::EImageDescriberType_stringToEnums(landmarksDescriberTypesName), S, R, t);
+          success = true;
+        }
         if (!success)
         {
-            ALICEVISION_LOG_ERROR("Failed to find a valid transformation for these " << markers.size() << " markers.");
+            ALICEVISION_LOG_ERROR("Failed to find a valid transformation for given markers.");
             return EXIT_FAILURE;
         }
         break;

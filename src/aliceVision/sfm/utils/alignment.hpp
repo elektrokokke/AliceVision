@@ -242,6 +242,17 @@ std::istream& operator>>(std::istream& in, MarkerWithCoord& marker);
 
 std::ostream& operator<<(std::ostream& os, const MarkerWithCoord& marker);
 
+struct MarkerDistance
+{
+    int id1;
+    int id2;
+    double distance;
+};
+
+std::istream& operator>>(std::istream& in, MarkerDistance& markerDistance);
+
+std::ostream& operator<<(std::ostream& os, const MarkerDistance& markerDistance);
+
 /**
 * @brief Compute a new coordinate system so that markers are aligned with the target coordinates.
 *
@@ -260,6 +271,23 @@ bool computeNewCoordinateSystemFromSpecificMarkers(const sfmData::SfMData& sfmDa
     double& out_S,
     Mat3& out_R,
     Vec3& out_t);
+
+/**
+* @brief Compute a scale factor based on the given distances between pairs of markers.
+*
+* @param[in] sfmData
+* @param[in] imageDescriberType
+* @param[in] markerDistances: pairs of marker ids associated with a distance each
+* @param[out] out_S resulting scale factor
+*/
+bool computeScaleFromMarkerDistances(const sfmData::SfMData& sfmData,
+    const feature::EImageDescriberType& imageDescriberType,
+    const std::vector<MarkerDistance>& markerDistances,
+    double& out_S);
+
+sfmData::Landmarks filterMarkers(const sfmData::Landmarks &landmarks,
+    const feature::EImageDescriberType& imageDescriberType,
+    const std::vector<MarkerWithCoord>& markers);
 
 } // namespace sfm
 } // namespace aliceVision
